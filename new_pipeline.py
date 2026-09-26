@@ -16,6 +16,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 class FraudDetectionPipeline:
+        """__init__ method is used as a initializer for each unique record."""
     def __init__(self, target_col='fraud_label', date_col='request_time'):
         self.target_col = target_col
         self.date_col = date_col
@@ -25,7 +26,7 @@ class FraudDetectionPipeline:
         self.top_domains = [] # Stores top email domains during training
 
     def hash_pii(self, val):
-        """Hashes PII for compliance."""
+        """We need to mask/hash PII data for a customer for complaince purpose and also can track if same customer comes again, beneficial for our model training."""
         if pd.isna(val):
             return "UNKNOWN"
         return hashlib.sha256(str(val).encode('utf-8')).hexdigest()
@@ -36,18 +37,27 @@ class FraudDetectionPipeline:
         df = df.copy()
         df[self.date_col] = pd.to_datetime(df[self.date_col])
         
-        # 1. Remove Target Leakage and Unused Columns (Customer Name)
-        cols_to_drop = ['request_status', 'customer_name']
+        # 1.Removing Irrelevant Features 
+        """request_status feature is creating target leakage recieved after the fraud check i.e removing this feature,
+        customer_name is unused feature having PII which is also not beneficial to the model so removing this feature,
+        mcc_code which is correlated with merchant_id will create Multi-collinearity problem afterwards so removing this feature,
+        mcc_title which is correlated with merchant_id will create Multi-collinearity problem afterwards so removing this feature,
+        request_type which is constant/single value for all rows i.e adding no intrinsic value to the model so removing this feature,
+        company_name is correlated with merchant_id will create Multi-collinearity problem afterwards so removing this feature,
+        currency_code which is constant/single value for all rows i.e adding no intrinsic value to the model so removing this feature,
+        partner_id contains the IFSC code for issuer_bank feature i.e will have Multicollinearity problem/redundant data afterwards while model building so removing this feature,
+        """
+        cols_to_drop = ['request_status', 'customer_name','mcc_code', 'mcc_title','request_type','company_name','currency_code','partner_id']
         df = df.drop(columns=[c for c in cols_to_drop if c in df.columns])
             
-        # 2. Extract Email Domain
+        # 2. Extracting Email Domain for getting the domains frequently used for transactions and probably fraud
         if 'email' in df.columns:
             # Extract domain (everything after '@')
             df['email_domain'] = df['email'].astype(str).apply(
                 lambda x: x.split('@')[-1].lower() if '@' in x else 'unknown'
             )
             
-            # Group rare domains to prevent OHE matrix explosion
+            # Group rare domains i.e Keeping Top 10 Categories of domain, rest all domains added into a single category for preventing column explosion and preserving model relevance
             if is_training:
                 # Learn the top 10 most common domains
                 self.top_domains = df['email_domain'].value_counts().nlargest(10).index.tolist()
@@ -60,7 +70,7 @@ class FraudDetectionPipeline:
             # Drop the original raw email column
             df = df.drop(columns=['email'])
 
-        # 3. Hash remaining PII (Phone, Device ID)
+        # 3. Hash remaining PII (Phone, Device ID), Directly calling hash_pii function i.e defined under the same class. Hashing done using SHA256 i.e considered standard for encoding and decoding PII data in Financial Data
         pii_cols = ['phone', 'device_id']
         for col in pii_cols:
             if col in df.columns:
@@ -72,9 +82,10 @@ class FraudDetectionPipeline:
         """Creates velocity and temporal features."""
         logger.info("Engineering features...")
         
-        # Temporal Features
+        # Temporal Features - Creating using the time variable available in this dataset. Useful for getting velocity, trend and season related time series variables
         df['hour_of_day'] = df[self.date_col].dt.hour
         df['day_of_week'] = df[self.date_col].dt.dayofweek
+        # Taking 12 AM to 5 AM as high fraud region of the day and curated a new feature using this hour_of_day curated feature
         df['is_high_risk_hour'] = df['hour_of_day'].apply(lambda x: 1 if 0 <= x <= 5 else 0)
         
         # Velocity Features (Simulating a feature store aggregation)
@@ -89,6 +100,7 @@ class FraudDetectionPipeline:
 
     def time_aware_split(self, df: pd.DataFrame, test_days=30):
         """Splits data strictly by time to prevent temporal leakage."""
+        # Here we are splitting the data based on time intervals and not any random splitting between train data and test data. 
         max_date = df[self.date_col].max()
         split_date = max_date - timedelta(days=test_days)
         
@@ -107,10 +119,11 @@ class FraudDetectionPipeline:
 
     def build_and_train_models(self, X_train, y_train):
         """Builds preprocessing pipelines and trains Champion and Challenger."""
-        
+        # Building pipeline for preprocessing which would be reused for train and test dataset and for future test dataset.
         # Define feature groups based on cardinality and type
-        high_card_categorical = ['merchant_id', 'mcc_code', 'company_name']
-        low_card_categorical = ['merchant_type', 'service_type', 'issuer_bank', 'email_domain']
+        
+        high_card_categorical = ['merchant_id', 'merchant_city]
+        low_card_categorical = ['merchant_type', 'merchant_state', 'service_type', 'issuer_bank', 'email_domain']
         numeric_cols = ['amount', 'hour_of_day', 'tx_count_24h_device', 'day_of_week', 'is_high_risk_hour']
         
         # Filter to only columns that actually exist in the dataframe
@@ -118,7 +131,7 @@ class FraudDetectionPipeline:
         low_card = [c for c in low_card_categorical if c in X_train.columns]
         num_features = [c for c in numeric_cols if c in X_train.columns]
 
-        # 3-Part Preprocessor: Scaling, OHE (Low Card), and Target Encoding (High Card)
+        # 3-Part Preprocessor: Scaling as we using Logistic Regrssion, OHE for Low Card. features and Target Encoding for High Card. features
         preprocessor = ColumnTransformer(
             transformers=[
                 ('num', StandardScaler(), num_features),
@@ -126,7 +139,7 @@ class FraudDetectionPipeline:
                 ('cat_high', TargetEncoder(min_samples_leaf=20, smoothing=10), high_card)
             ])
 
-        # Challenger: Logistic Regression
+        # Challenger: Logistic Regression - Taking Hyperparameters as base parameters only, with taking class_weight as 'balanced' 
         self.challenger_model = Pipeline(steps=[
             ('preprocessor', preprocessor),
             ('classifier', LogisticRegression(class_weight='balanced', max_iter=1000))
