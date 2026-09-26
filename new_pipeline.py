@@ -139,13 +139,15 @@ class FraudDetectionPipeline:
                 ('cat_high', TargetEncoder(min_samples_leaf=20, smoothing=10), high_card)
             ])
 
-        # Challenger: Logistic Regression - Taking Hyperparameters as base parameters only, with taking class_weight as 'balanced' 
+        # Challenger: Logistic Regression - Taking Hyperparameters as base parameters only, with taking class_weight as 'balanced' this will penalize the algorithm way more for missing a single fraudulent transaction than for misclassifying a genuine transaction.
+        # Not using any Oversampling technique like SMOTE as it distorts with real probabilities and class weights keeps the real data intergrity.
         self.challenger_model = Pipeline(steps=[
             ('preprocessor', preprocessor),
             ('classifier', LogisticRegression(class_weight='balanced', max_iter=1000))
         ])
 
-        # Champion: XGBoost 
+        # Champion: XGBoost -- using a scaling mechanism for dealing with class imbalance i.e 'scale_pos_weight', taking eval_metric as 'pr-auc' as it helps in class imbalance dataset.
+        # Didn't use HPT because boost given to PR-AUC is very limited compared to risk of overfitting on this already class imbalance dataset
         scale_pos = (len(y_train) - sum(y_train)) / sum(y_train) if sum(y_train) > 0 else 1
         self.champion_model = Pipeline(steps=[
             ('preprocessor', preprocessor),
