@@ -16,6 +16,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 class FraudDetectionPipeline:
+        """__init__ method is used as a initializer for each unique record."""
     def __init__(self, target_col='fraud_label', date_col='request_time'):
         self.target_col = target_col
         self.date_col = date_col
@@ -24,7 +25,7 @@ class FraudDetectionPipeline:
         self.registry = [] # Simulates MLflow registry
 
     def hash_pii(self, val):
-        """Hashes PII for compliance."""
+        """We need to mask/hash PII data for a customer for complaince purpose and also can track if same customer comes again, beneficial for our model training."""
         if pd.isna(val):
             return "UNKNOWN"
         return hashlib.sha256(str(val).encode('utf-8')).hexdigest()
@@ -33,14 +34,15 @@ class FraudDetectionPipeline:
         """Cleans data, drops leakage, and hashes identifiers."""
         logger.info("Starting preprocessing...")
         df = df.copy()
+        
         df[self.date_col] = pd.to_datetime(df[self.date_col])
         
-        # 1. Remove Target Leakage
+        # 1. Remove Target Leakage, Request Status is recieved after the fraud check
         if 'request_status' in df.columns:
-            df = df.drop(columns=['request_status'])
+            df = df.drop(columns=['request_status','customer_name'])
             
         # 2. Hash PII fields
-        pii_cols = ['phone', 'email', 'customer_name', 'device_id']
+        pii_cols = ['phone', 'email', 'device_id']
         for col in pii_cols:
             if col in df.columns:
                 df[col] = df[col].apply(self.hash_pii)
