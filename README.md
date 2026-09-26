@@ -22,14 +22,15 @@
 To maximize predictive power without leaking future information, the following transformations are applied in the `FraudDetectionPipeline`:
 * **PII Masking:** `phone` and `device_id` are hashed using SHA-256. This ensures compliance while allowing the model to recognize repeat bad actors.
 * **Temporal Features:** Extracted `hour_of_day` and `day_of_week`. Created a high-signal boolean feature `is_high_risk_hour` (e.g., 12 AM to 5 AM) which frequently correlates with unauthorized account takeovers.
-* **Features Removed:** request_status feature is creating target leakage recieved after the fraud check i.e removing this feature,
-        customer_name is unused feature having PII which is also not beneficial to the model so removing this feature,
-        mcc_code which is correlated with merchant_id will create Multi-collinearity problem afterwards so removing this feature,
-        mcc_title which is correlated with merchant_id will create Multi-collinearity problem afterwards so removing this feature,
-        request_type which is constant/single value for all rows i.e adding no intrinsic value to the model so removing this feature,
-        company_name is correlated with merchant_id will create Multi-collinearity problem afterwards so removing this feature,
-        currency_code which is constant/single value for all rows i.e adding no intrinsic value to the model so removing this feature,
-        partner_id contains the IFSC code for issuer_bank feature i.e will have Multicollinearity problem/redundant data afterwards while model building so removing this feature 
+* **Features Removed:**
+  * request_status feature is creating target leakage recieved after the fraud check i.e removing this feature,
+  * customer_name is unused feature having PII which is also not beneficial to the model so removing this feature,
+  * mcc_code which is correlated with merchant_id will create Multi-collinearity problem afterwards so removing this feature,
+  * mcc_title which is correlated with merchant_id will create Multi-collinearity problem afterwards so removing this feature,
+  * request_type which is constant/single value for all rows i.e adding no intrinsic value to the model so removing this feature,
+  * company_name is correlated with merchant_id will create Multi-collinearity problem afterwards so removing this feature,
+  * currency_code which is constant/single value for all rows i.e adding no intrinsic value to the model so removing this feature,
+  * partner_id contains the IFSC code for issuer_bank feature i.e will have Multicollinearity problem/redundant data afterwards while model building so removing this feature 
 * **Velocity Features:** Created `tx_count_24h_device` to track the number of transactions per device in a rolling 24-hour window. Sudden spikes are strong indicators of card-testing or fraud rings. *(In production, this requires a low-latency Feature Store like Redis).*
 * **Domain Extraction:** Extracted the domain from the `email` field. Kept the top 10 most frequent domains and bucketed the rest into "other" to prevent high-cardinality explosions.
 * **Leakage Prevention:** Dropped `request_status` (since it is determined *after* the transaction), `customer_name`, and highly correlated/redundant IDs (`mcc_code`, `partner_id`).
