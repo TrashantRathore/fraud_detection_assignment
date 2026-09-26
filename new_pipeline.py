@@ -5,6 +5,7 @@ from datetime import timedelta
 import xgboost as xgb
 from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import Pipeline
+from sklearn.impute import SimpleImputer
 from sklearn.compose import ColumnTransformer
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
 from sklearn.metrics import precision_recall_curve, auc, roc_auc_score
@@ -38,14 +39,14 @@ class FraudDetectionPipeline:
         df[self.date_col] = pd.to_datetime(df[self.date_col])
         
         # 1.Removing Irrelevant Features 
-        """request_status feature is creating target leakage recieved after the fraud check i.e removing this feature,
+        """[request_status feature is creating target leakage recieved after the fraud check i.e removing this feature,
         customer_name is unused feature having PII which is also not beneficial to the model so removing this feature,
         mcc_code which is correlated with merchant_id will create Multi-collinearity problem afterwards so removing this feature,
         mcc_title which is correlated with merchant_id will create Multi-collinearity problem afterwards so removing this feature,
         request_type which is constant/single value for all rows i.e adding no intrinsic value to the model so removing this feature,
         company_name is correlated with merchant_id will create Multi-collinearity problem afterwards so removing this feature,
         currency_code which is constant/single value for all rows i.e adding no intrinsic value to the model so removing this feature,
-        partner_id contains the IFSC code for issuer_bank feature i.e will have Multicollinearity problem/redundant data afterwards while model building so removing this feature,
+        partner_id contains the IFSC code for issuer_bank feature i.e will have Multicollinearity problem/redundant data afterwards while model building so removing this feature]
         """
         cols_to_drop = ['request_status', 'customer_name','mcc_code', 'mcc_title','request_type','company_name','currency_code','partner_id']
         df = df.drop(columns=[c for c in cols_to_drop if c in df.columns])
@@ -99,7 +100,7 @@ class FraudDetectionPipeline:
         return df
 
     def time_aware_split(self, df: pd.DataFrame, test_days=30):
-        """Splits data strictly by time to prevent temporal leakage."""
+        """Splits data strictly by time to prevent temporal leakage. The train/test data split is around ~ 75:25 split on whole data"""
         # Here we are splitting the data based on time intervals and not any random splitting between train data and test data. 
         max_date = df[self.date_col].max()
         split_date = max_date - timedelta(days=test_days)
@@ -122,7 +123,7 @@ class FraudDetectionPipeline:
         # Building pipeline for preprocessing which would be reused for train and test dataset and for future test dataset.
         # Define feature groups based on cardinality and type
         
-        high_card_categorical = ['merchant_id', 'merchant_city]
+        high_card_categorical = ['merchant_id', 'merchant_city']
         low_card_categorical = ['merchant_type', 'merchant_state', 'service_type', 'issuer_bank', 'email_domain']
         numeric_cols = ['amount', 'hour_of_day', 'tx_count_24h_device', 'day_of_week', 'is_high_risk_hour']
         
@@ -132,15 +133,36 @@ class FraudDetectionPipeline:
         num_features = [c for c in numeric_cols if c in X_train.columns]
 
         # 3-Part Preprocessor: Scaling as we using Logistic Regrssion, OHE for Low Card. features and Target Encoding for High Card. features
+
+        # Categorical pipeline addition -- Taking "Missing" as a category for all the missing values in categorical features
+        # Define the pipelines for low and high cardinality categorical features
+        cat_low_transformer = Pipeline(steps=[
+            ('imputer', SimpleImputer(strategy='constant', fill_value='Missing')),
+            ('encoder', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
+        ])
+        
+        cat_high_transformer = Pipeline(steps=[
+            ('imputer', SimpleImputer(strategy='constant', fill_value='Missing')),
+            ('encoder', TargetEncoder(min_samples_leaf=20, smoothing=10))
+        ])
+        
+        # numeric imputer using "median" as missing imputer strategy and using StandardScaler as standardizing technique to keep all features onto same scale.
+        # Scaling is not required for XGBoost i.e it doesn't depend on the scale/magnitude of features rather simple splitting on rules.
+        num_transformer = Pipeline(steps=[
+            ('imputer', SimpleImputer(strategy='median')),
+            ('scaler', StandardScaler())
+        ])
+        
+        # 2. ColumnTransformer -- Pipeline to handle numeric and categorical features. 
         preprocessor = ColumnTransformer(
             transformers=[
-                ('num', StandardScaler(), num_features),
-                ('cat_low', OneHotEncoder(handle_unknown='ignore', sparse_output=False), low_card),
-                ('cat_high', TargetEncoder(min_samples_leaf=20, smoothing=10), high_card)
+                ('num', num_transformer, num_features),
+                ('cat_low', cat_low_transformer, low_card),
+                ('cat_high', cat_high_transformer, high_card)
             ])
 
         # Challenger: Logistic Regression - Taking Hyperparameters as base parameters only, with taking class_weight as 'balanced' this will penalize the algorithm way more for missing a single fraudulent transaction than for misclassifying a genuine transaction.
-        # Not using any Oversampling technique like SMOTE as it distorts with real probabilities and class weights keeps the real data intergrity.
+        # Not using any Oversampling technique like SMOTE as it distorts with real probabilities but class weights keeps the real data intergrity.
         self.challenger_model = Pipeline(steps=[
             ('preprocessor', preprocessor),
             ('classifier', LogisticRegression(class_weight='balanced', max_iter=1000))
@@ -178,7 +200,18 @@ class FraudDetectionPipeline:
         f1_scores = 2 * (precision * recall) / (precision + recall + 1e-10)
         best_idx = np.argmax(f1_scores)
         optimal_threshold = thresholds[best_idx] if best_idx < len(thresholds) else 0.5
-        
+
+        """
+            Evaluates model performance, calculates the optimal prediction threshold, and logs metrics to the registry.
+            This method calculates standard binary classification metrics (PR-AUC and ROC-AUC). It dynamically determines the optimal classification 
+            threshold by finding the probability cutoff on the Precision-Recall curve that maximizes the F1-score. 
+            Finally, it packages these evaluation metrics into a dictionary, appends it to the internal model 
+            registry, and flags it for simulated shadow deployment. 
+
+            The final decisioning of fraud/non-fraud depends on multiple factors, business risk taking ability, model probabilities of scored transactions, 
+            business metrics to be measured while dealing with fraud transactions.   
+        """
+            
         metrics = {
             "model_name": model_name,
             "pr_auc": round(pr_auc, 4),
